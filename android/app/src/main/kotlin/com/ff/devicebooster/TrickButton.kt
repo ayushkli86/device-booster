@@ -36,12 +36,20 @@ class TrickButton @JvmOverloads constructor(
     private var armed = false
     private var pressed = false
 
+    /** When true the position is pinned; see [setLocked]. */
+    private var locked = false
+
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val crossPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
+    }
+    private val lockPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
     }
     private val bounds = RectF()
 
@@ -61,17 +69,42 @@ class TrickButton @JvmOverloads constructor(
     private var startY = 0
     private var dragging = false
 
-    /** Reports the new position so the service can move the window. */
-    var onMoved: ((x: Int, y: Int) -> Unit)? = null
-    var onTapped: (() -> Unit)? = null
-    var onSettled: ((TrickButtonConfig) -> Unit)? = null
+    /** True once a long press has fired, so ACTION_UP does not also tap. */
+    private var longPressFired = false
+
+    private val longPressTimeout = ViewConfiguration.getLongPressTimeout().toLong()
+
+    // Allocated once: constructing a Runnable per ACTION_DOWN would put garbage
+    // on the touch path.
+    private val longPressRunnable = Runnable {
+        if (!dragging) {
+            longPressFired = true
+            toggleLock()
+        }
+    }
+
+    /**
+     * Non-generic callbacks on purpose. A Kotlin `Function2<Int, Int, Unit>`
+     * would box both arguments on every ACTION_MOVE; a plain interface gives a
+     * direct call with primitive ints.
+     */
+    interface Listener {
+        fun onMoved(x: Int, y: Int)
+        fun onSettled(config: TrickButtonConfig)
+        fun onTap()
+        fun onLockChanged(locked: Boolean)
+    }
+
+    var listener: Listener? = null
 
     fun applyConfig(next: TrickButtonConfig) {
         val previous = config
         config = next.clamped()
         val changed = previous.sizeDp != config.sizeDp || previous.borderDp != config.borderDp
+        if (previous.locked != config.locked) locked = config.locked
+        if (changed) refreshBounds()
         invalidate()
-        if (changed) onSettled?.invoke(config)
+        if (changed) listener?.onSettled(config)
     }
 
     fun currentConfig(): TrickButtonConfig = config
@@ -82,6 +115,20 @@ class TrickButton @JvmOverloads constructor(
         if (armed == value) return
         armed = value
         invalidate()
+    }
+
+    fun isLocked(): Boolean = locked
+
+    fun setLocked(value: Boolean) {
+        if (locked == value) return
+        locked = value
+        config = config.copy(locked = value)
+        invalidate()
+    }
+
+    private fun toggleLock() {
+        setLocked(!locked)
+        listener?.onLockChanged(locked)
     }
 
     private fun updatePressed(value: Boolean) {
@@ -129,6 +176,37 @@ class TrickButton @JvmOverloads constructor(
             val dotRadius = (outer * if (pressed) 0.28f else 0.22f).coerceAtLeast(1f)
             canvas.drawCircle(cx, cy, dotRadius, dotPaint)
         }
+
+        if (locked) drawLock(canvas, cx, outer, ringWidth, alpha, density)
+    }
+
+    /** A small padlock at the top of the face, so a pinned button is obvious. */
+    private fun drawLock(
+        canvas: Canvas,
+        cx: Float,
+        outer: Float,
+        ringWidth: Float,
+        alpha: Int,
+        density: Float,
+    ) {
+        val w = outer * 0.30f
+        val top = outer * 0.12f + ringWidth * 0.5f
+        lockPaint.color = applyAlpha(Color.WHITE, alpha)
+        lockPaint.strokeWidth = (1.5f * density).coerceAtLeast(1f)
+
+        // Shackle: the top half of a circle, inset to look like a U.
+        val shackleInset = w * 0.22f
+        bounds.set(
+            cx - w / 2f + shackleInset,
+            top,
+            cx + w / 2f - shackleInset,
+            top + (w - shackleInset * 2f) / 2f * 2f,
+        )
+        canvas.drawArc(bounds, 180f, 180f, false, lockPaint)
+
+        // Body.
+        bounds.set(cx - w / 2f, top + w * 0.30f, cx + w / 2f, top + w * 0.30f + w * 0.52f)
+        canvas.drawRoundRect(bounds, w * 0.12f, w * 0.12f, lockPaint)
     }
 
     private fun applyAlpha(color: Int, alpha: Int) =
@@ -143,53 +221,77 @@ class TrickButton @JvmOverloads constructor(
                 startX = screenX
                 startY = screenY
                 dragging = false
+                longPressFired = false
                 updatePressed(true)
+                // A long press pins the button in place.
+                postDelayed(longPressRunnable, longPressTimeout)
             }
+
+            // A second finger aborts the gesture cleanly, otherwise lifting one
+            // finger can leave the button stuck mid-drag.
+            MotionEvent.ACTION_POINTER_DOWN -> abortGesture()
 
             MotionEvent.ACTION_MOVE -> {
                 val dx = event.rawX - downRawX
                 val dy = event.rawY - downRawY
-                if (!dragging && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
+                if (!dragging && TrickButtonMath.isDrag(dx, dy, touchSlop)) {
                     dragging = true
+                    removeCallbacks(longPressRunnable)
                 }
-                if (dragging) {
-                    // pullSpeed < 1 makes the button trail the finger, so small
-                    // corrections stay precise instead of overshooting.
-                    val scale = config.pullSpeed.coerceIn(
-                        TrickButtonConfig.MIN_PULL_SPEED,
-                        TrickButtonConfig.MAX_PULL_SPEED,
-                    )
-                    var nx = startX + (dx * scale).roundToInt()
-                    var ny = startY + (dy * scale).roundToInt()
+                if (dragging && !locked) {
+                    var nx = TrickButtonMath.dragged(startX, dx, config.pullSpeed)
+                    var ny = TrickButtonMath.dragged(startY, dy, config.pullSpeed)
 
                     if (config.preventOverPull) {
-                        val (minX, maxX, minY, maxY) = boundsForCurrentSize()
-                        nx = nx.coerceIn(minX, maxX)
-                        ny = ny.coerceIn(minY, maxY)
+                        nx = TrickButtonMath.clampToScreen(nx, maxX)
+                        ny = TrickButtonMath.clampToScreen(ny, maxY)
                     }
                     screenX = nx
                     screenY = ny
-                    onMoved?.invoke(nx, ny)
+                    listener?.onMoved(nx, ny)
                 }
             }
 
             MotionEvent.ACTION_UP -> {
-                // Toggle first, then clear only the pressed state so the
-                // freshly armed state survives the finger lift.
-                if (!dragging) onTapped?.invoke()
+                removeCallbacks(longPressRunnable)
+                // A long press already consumed this gesture as a lock toggle.
+                if (!dragging && !longPressFired) {
+                    performClick()
+                    listener?.onTap()
+                }
                 updatePressed(false)
-                onSettled?.invoke(config)
+                dragging = false
+                longPressFired = false
+                listener?.onSettled(config)
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                updatePressed(false)
-                onSettled?.invoke(config)
+                abortGesture()
+                listener?.onSettled(config)
             }
         }
+        // Always true, in every branch including locked and cancel: returning
+        // false would hand this touch to the app underneath.
         return true
     }
 
-    private fun boundsForCurrentSize(): IntArray {
+    private fun abortGesture() {
+        removeCallbacks(longPressRunnable)
+        updatePressed(false)
+        dragging = false
+        longPressFired = false
+    }
+
+    /**
+     * Cached `[minX, maxX, minY, maxY]` limits for the button's current size.
+     * Recomputed on config change and rotation, so the ACTION_MOVE path reads
+     * two ints instead of allocating an array per frame.
+     */
+    private var maxX = 0
+    private var maxY = 0
+
+    /** Recalculates the cached limits; call after a size or display change. */
+    fun refreshBounds() {
         val size = (config.sizeDp * resources.displayMetrics.density).roundToInt()
         val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val metrics = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -198,10 +300,10 @@ class TrickButton @JvmOverloads constructor(
             val d = context.resources.displayMetrics
             android.graphics.Rect(0, 0, d.widthPixels, d.heightPixels)
         }
-        val maxX = (metrics.width() - size).coerceAtLeast(0)
-        val maxY = (metrics.height() - size).coerceAtLeast(0)
-        return intArrayOf(0, maxX, 0, maxY)
+        maxX = (metrics.width() - size).coerceAtLeast(0)
+        maxY = (metrics.height() - size).coerceAtLeast(0)
     }
 
-    override fun performClick(): Boolean = super.performClick()
+    /** Current `[minX, maxX, minY, maxY]`; allocates, so not for the touch path. */
+    fun screenBounds(): IntArray = intArrayOf(0, maxX, 0, maxY)
 }

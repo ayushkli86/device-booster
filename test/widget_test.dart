@@ -33,6 +33,7 @@ void main() {
         'ringColor': 0xFF7EE787,
         'dotColor': 0xFFFF6B6B,
         'backColor': 0xFF101418,
+        'locked': false,
       });
     trickSaves.clear();
 
@@ -171,6 +172,35 @@ void main() {
     expect(
       trickSaves.where((m) => m.containsKey('enabled')).map((m) => m['enabled']),
       [false, true],
+    );
+  });
+
+  testWidgets('lock toggle can be turned on and off again',
+      (WidgetTester tester) async {
+    await tester.pumpWidget(const BoosterApp());
+    await settleInitialLoad(tester);
+
+    await tester.scrollUntilVisible(find.text('Lock button position'), 200);
+    final tile = find.widgetWithText(SwitchListTile, 'Lock button position');
+    final toggle = find.descendant(of: tile, matching: find.byType(Switch));
+    // The row can still sit below the fold of the 800x600 test surface even
+    // after its label scrolled into view.
+    await tester.ensureVisible(toggle);
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<Switch>(toggle).value, isFalse);
+
+    await tester.tap(toggle);
+    await settleInitialLoad(tester);
+    expect(tester.widget<Switch>(toggle).value, isTrue);
+
+    await tester.tap(toggle);
+    await settleInitialLoad(tester);
+    expect(tester.widget<Switch>(toggle).value, isFalse);
+
+    expect(
+      trickSaves.where((m) => m.containsKey('locked')).map((m) => m['locked']),
+      [true, false],
     );
   });
 

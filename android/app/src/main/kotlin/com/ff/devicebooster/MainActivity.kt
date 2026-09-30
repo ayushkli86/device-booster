@@ -371,6 +371,7 @@ class MainActivity : FlutterActivity() {
         "ringColor" to c.ringColor,
         "dotColor" to c.dotColor,
         "backColor" to c.backColor,
+        "locked" to c.locked,
     )
 
     private fun trickConfigFromCall(call: MethodCall): TrickButtonConfig {
@@ -391,6 +392,7 @@ class MainActivity : FlutterActivity() {
             backColor = int("backColor", base.backColor),
             x = base.x,
             y = base.y,
+            locked = bool("locked", base.locked),
         ).clamped()
     }
 

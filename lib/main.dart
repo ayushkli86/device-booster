@@ -53,6 +53,7 @@ class _TrickPreview extends StatelessWidget {
     required this.dotColor,
     required this.backColor,
     required this.active,
+    required this.locked,
   });
 
   final double sizeDp;
@@ -62,6 +63,7 @@ class _TrickPreview extends StatelessWidget {
   final Color dotColor;
   final Color backColor;
   final bool active;
+  final bool locked;
 
   @override
   Widget build(BuildContext context) {
@@ -79,7 +81,35 @@ class _TrickPreview extends StatelessWidget {
           color: backColor.withValues(alpha: a),
           border: Border.all(color: Colors.white.withValues(alpha: a * 0.35), width: 1),
         ),
-        child: Center(
+        child: locked
+            ? Stack(
+                alignment: Alignment.topCenter,
+                children: [
+                  _face(px, border, a, ringColor, dotColor, active),
+                  Padding(
+                    padding: EdgeInsets.only(top: px * 0.12),
+                    child: Icon(
+                      Icons.lock,
+                      size: (px * 0.20).clamp(8.0, 44.0),
+                      color: Colors.white.withValues(alpha: a),
+                    ),
+                  ),
+                ],
+              )
+            : _face(px, border, a, ringColor, dotColor, active),
+      ),
+    );
+  }
+
+  Widget _face(
+    double px,
+    double border,
+    double a,
+    Color ringColor,
+    Color dotColor,
+    bool active,
+  ) =>
+      Center(
           child: Container(
             width: px - border * 4,
             height: px - border * 4,
@@ -107,10 +137,7 @@ class _TrickPreview extends StatelessWidget {
                     ),
             ),
           ),
-        ),
-      ),
-    );
-  }
+        );
 }
 
 class BoosterApp extends StatelessWidget {
@@ -166,6 +193,7 @@ class _HomePageState extends State<HomePage> {
   double _trickBorder = 4;
   double _trickOpacity = 85;
   bool _preventOverPull = true;
+  bool _trickLocked = false;
   double _pullSpeed = 1.0;
   int _ringColor = 0xFF7EE787;
   int _dotColor = 0xFFFF6B6B;
@@ -268,6 +296,7 @@ class _HomePageState extends State<HomePage> {
         _trickBorder = (config['borderDp'] as num?)?.toDouble() ?? 4;
         _trickOpacity = (config['opacity'] as num?)?.toDouble() ?? 85;
         _preventOverPull = config['preventOverPull'] as bool? ?? true;
+        _trickLocked = config['locked'] as bool? ?? false;
         _pullSpeed = (config['pullSpeed'] as num?)?.toDouble() ?? 1.0;
         _ringColor = (config['ringColor'] as num?)?.toInt() ?? 0xFF7EE787;
         _dotColor = (config['dotColor'] as num?)?.toInt() ?? 0xFFFF6B6B;
@@ -511,6 +540,7 @@ class _HomePageState extends State<HomePage> {
       dotColor: Color(_dotColor),
       backColor: Color(_backColor),
       active: _trickRunning,
+      locked: _trickLocked,
     );
 
     return Card(
@@ -602,6 +632,18 @@ class _HomePageState extends State<HomePage> {
               subtitle: const Text(
                 'Resists drags that would pull the button under the status bar '
                 'or off the screen.',
+              ),
+            ),
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              value: _trickLocked,
+              onChanged: (v) => unawaited(_saveTrick({'locked': v})),
+              title: const Text('Lock button position'),
+              subtitle: const Text(
+                'Pins the button where it is. It still swallows every touch on '
+                'itself, so nothing leaks to the app underneath. Long press the '
+                'button to toggle this without opening the app.',
               ),
             ),
             const SizedBox(height: 8),
@@ -712,6 +754,9 @@ class _HomePageState extends State<HomePage> {
       if (changes['opacity'] != null) _trickOpacity = (changes['opacity']! as num).toDouble();
       if (changes['preventOverPull'] != null) {
         _preventOverPull = changes['preventOverPull']! as bool;
+      }
+      if (changes['locked'] != null) {
+        _trickLocked = changes['locked']! as bool;
       }
       if (changes['pullSpeed'] != null) _pullSpeed = (changes['pullSpeed']! as num).toDouble();
       if (changes['ringColor'] != null) _ringColor = (changes['ringColor']! as num).toInt();

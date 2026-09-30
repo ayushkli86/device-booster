@@ -2,6 +2,8 @@ package com.ff.devicebooster
 
 import android.content.Context
 import android.graphics.Color
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * User-tunable appearance and behaviour of the trick button.
@@ -21,6 +23,11 @@ data class TrickButtonConfig(
     val backColor: Int = DEFAULT_BACK,
     val x: Int = 0,
     val y: Int = 0,
+    /**
+     * When true the button is pinned where it is: dragging is ignored, but
+     * touches are still consumed so they never leak to the app underneath.
+     */
+    val locked: Boolean = false,
 ) {
     /** 0..1 alpha applied to the whole button. */
     val alphaFraction: Float get() = (opacity.coerceIn(0, 100)) / 100f
@@ -47,6 +54,38 @@ data class TrickButtonConfig(
     )
 }
 
+/**
+ * The drag maths, kept free of Android types so it can be unit tested on the
+ * JVM. Every function here runs on the ACTION_MOVE hot path, so none of them
+ * allocate.
+ */
+object TrickButtonMath {
+
+    /** Distance the finger must travel before a touch counts as a drag. */
+    fun isDrag(dx: Float, dy: Float, touchSlop: Int): Boolean =
+        abs(dx) > touchSlop || abs(dy) > touchSlop
+
+    /**
+     * Where the button should sit for a finger delta of [delta] starting at
+     * [start]. A [pullSpeed] of 1 tracks the finger exactly; lower values make
+     * the button trail it, which damps overshoot.
+     */
+    fun dragged(start: Int, delta: Float, pullSpeed: Float): Int {
+        val speed = pullSpeed.coerceIn(
+            TrickButtonConfig.MIN_PULL_SPEED,
+            TrickButtonConfig.MAX_PULL_SPEED,
+        )
+        return start + (delta * speed).roundToInt()
+    }
+
+    /**
+     * Keeps the button fully on screen. [max] is `screenSize - buttonSize` and
+     * is floored at 0 so a screen smaller than the button cannot invert the
+     * range and throw the button off the display.
+     */
+    fun clampToScreen(value: Int, max: Int): Int = value.coerceIn(0, max.coerceAtLeast(0))
+}
+
 /** Persists the config so the button reopens the way the user left it. */
 object TrickButtonStore {
     private fun prefs(context: Context) =
@@ -67,6 +106,7 @@ object TrickButtonStore {
             backColor = p.getInt("backColor", d.backColor),
             x = p.getInt("x", d.x),
             y = p.getInt("y", d.y),
+            locked = p.getBoolean("locked", d.locked),
         ).clamped()
     }
 
@@ -84,6 +124,7 @@ object TrickButtonStore {
             .putInt("backColor", v.backColor)
             .putInt("x", v.x)
             .putInt("y", v.y)
+            .putBoolean("locked", v.locked)
             .apply()
     }
 }
