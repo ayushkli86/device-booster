@@ -6,6 +6,8 @@ import android.util.Log
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
 import java.lang.reflect.Method
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * Thin wrapper around the Shizuku API.
@@ -19,6 +21,18 @@ object ShizukuHelper {
 
     private const val TAG = "DeviceBooster"
     const val REQUEST_CODE = 9001
+
+    /** How long to wait for the stream pumps after the child exits. */
+    private const val STREAM_JOIN_MS = 2_000L
+
+    /**
+     * Serialised off-main-thread worker for shell callers. The shells block on
+     * `waitFor`, which on the main thread once froze the overlay's panel for as
+     * long as a hung `cmd` took to time out.
+     */
+    val shellExecutor: ExecutorService = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "shizuku-shell").apply { isDaemon = true }
+    }
 
     /** Invoked after the user answers the Shizuku permission dialog. */
     @Volatile
@@ -57,21 +71,36 @@ object ShizukuHelper {
         else -> "Shizuku is running - permission not granted yet"
     }
 
+    private var attachedListener: Shizuku.OnRequestPermissionResultListener? = null
+
+    /**
+     * Idempotent: the activity can be recreated any number of times, and each
+     * re-attach used to stack another listener, so one permission answer
+     * notified the UI once per registration.
+     */
     fun attach() {
-        Shizuku.addRequestPermissionResultListener(
-            object : Shizuku.OnRequestPermissionResultListener {
-                override fun onRequestPermissionResult(requestCode: Int, grantResult: Int) {
-                    if (requestCode == REQUEST_CODE) onPermissionChanged?.invoke()
-                }
-            },
-        )
+        if (attachedListener != null) return
+        val listener = object : Shizuku.OnRequestPermissionResultListener {
+            override fun onRequestPermissionResult(requestCode: Int, grantResult: Int) {
+                if (requestCode == REQUEST_CODE) onPermissionChanged?.invoke()
+            }
+        }
+        Shizuku.addRequestPermissionResultListener(listener)
+        attachedListener = listener
     }
 
     fun requestPermission() {
         if (isRunning() && !isGranted()) Shizuku.requestPermission(REQUEST_CODE)
     }
 
-    /** Runs [script] through `sh -c` at shell privilege and returns its stdout. */
+    /**
+     * Runs [script] through `sh -c` at shell privilege and returns its stdout.
+     *
+     * Always call from a background thread - see [shellExecutor]. Stdout and
+     * stderr are drained in parallel before `waitFor`: reading them back to
+     * back used to let a chatty command fill the 64 KiB stderr pipe and block
+     * the child forever.
+     */
     fun shell(context: Context, script: String): Result<String> {
         if (!isGranted()) {
             return Result.failure(IllegalStateException("Shizuku not authorised"))
@@ -86,17 +115,39 @@ object ShizukuHelper {
         }
 
         return try {
-            val output = StringBuilder()
-            process.inputStream.bufferedReader().use { reader: BufferedReader ->
-                reader.forEachLine { output.append(it).append('\n') }
-            }
-            val stdout = output.toString().trim()
-            if (process.waitFor() == 0) {
+            // Both pipes must be drained concurrently or one can fill while we
+            // are still reading the other; that deadlocked waitFor on probe
+            // commands that log to stderr. Plain threads, not a shared pool: a
+            // shared worker that is still draining stdout cannot also drain
+            // stderr, which re-creates exactly this deadlock.
+            var stdout = ""
+            var stderr = ""
+            val stdoutPump = Thread {
+                val output = StringBuilder()
+                runCatching {
+                    process.inputStream.bufferedReader().use { reader: BufferedReader ->
+                        reader.forEachLine { output.append(it).append('\n') }
+                    }
+                }
+                stdout = output.toString().trim()
+            }.apply { start() }
+            val stderrPump = Thread {
+                stderr = runCatching {
+                    process.errorStream.bufferedReader().use { it.readText() }
+                }.getOrDefault("")
+            }.apply { start() }
+
+            val exit = process.waitFor()
+            stdoutPump.join(STREAM_JOIN_MS)
+            stderrPump.join(STREAM_JOIN_MS)
+            if (exit == 0) {
                 Result.success(stdout)
             } else {
                 Result.failure(
                     IllegalStateException(
-                        "exit ${process.exitValue()}${if (stdout.isEmpty()) "" else ": $stdout"}",
+                        "exit $exit" +
+                            (if (stdout.isEmpty()) "" else ": $stdout") +
+                            (if (stderr.isEmpty()) "" else ". $stderr"),
                     ),
                 )
             }

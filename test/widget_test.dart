@@ -24,6 +24,10 @@ void main() {
   // authorised, so a test that needs them has to flip this.
   var shizukuGranted = false;
 
+  // Mirrors whether the native service is on screen; the card's subtitle
+  // changes with it.
+  var trickRunning = false;
+
   setUp(() {
     trickConfig
       ..clear()
@@ -41,6 +45,7 @@ void main() {
       });
     trickSaves.clear();
     shizukuGranted = false;
+    trickRunning = false;
 
     // The home page talks to a native MethodChannel on first frame; stub it so
     // the widget tree can be pumped without a live Android side.
@@ -84,7 +89,7 @@ void main() {
             },
             'probeActions' => <String, dynamic>{'actions': <dynamic>[], 'gpuTuning': false},
             'trickConfig' => Map<String, dynamic>.from(trickConfig),
-            'trickRunning' => false,
+            'trickRunning' => trickRunning,
             'trickStart' => true,
             'trickStop' => true,
             'sample' => <String, dynamic>{
@@ -253,6 +258,38 @@ void main() {
     // The device's actual computility level is reported, not offered as a control.
     expect(find.textContaining('CPU level 1'), findsOneWidget);
     expect(find.textContaining('Read-only.'), findsOneWidget);
+  });
+
+  testWidgets('a locked running button describes pass-through until unlocked',
+      (WidgetTester tester) async {
+    trickRunning = true;
+    trickConfig['locked'] = true;
+    await tester.pumpWidget(const BoosterApp());
+    await settleInitialLoad(tester);
+
+    await tester.scrollUntilVisible(find.text('Lock button position'), 200);
+    expect(find.textContaining('taps pass straight through'), findsOneWidget,
+        reason: 'locked state must promise touch pass-through, not dragging');
+    // The preview mirrors the native locked face: the padlock icon on the disc.
+    expect(find.byIcon(Icons.lock), findsOneWidget);
+
+    // Unlocking from the app must update the subtitle through the same
+    // save-reload path the device uses, so the copy can never go stale.
+    final tile = find.widgetWithText(SwitchListTile, 'Lock button position');
+    final toggle = find.descendant(of: tile, matching: find.byType(Switch));
+    await tester.ensureVisible(toggle);
+    await tester.pumpAndSettle();
+    await tester.tap(toggle);
+    await settleInitialLoad(tester);
+
+    expect(tester.widget<Switch>(toggle).value, isFalse);
+    expect(find.textContaining('Drag to move it'), findsOneWidget,
+        reason: 'unlocked state must describe dragging, not pass-through');
+    expect(find.byIcon(Icons.lock), findsNothing);
+    expect(
+      trickSaves.where((m) => m.containsKey('locked')).map((m) => m['locked']),
+      [false],
+    );
   });
 
   testWidgets('shows a failure instead of a blank screen when the bridge throws',

@@ -466,10 +466,15 @@ class TrickButtonService : Service(), TrickButton.Listener, LockControl.Listener
         val b = view.screenBounds()
         val nx = TrickButtonMath.clampToScreen(view.screenX, b[1])
         val ny = TrickButtonMath.clampToScreen(view.screenY, b[3])
+        // A pinned button that got pushed off screen must be unlocked so the
+        // user can reach it again - but a button that stayed in view keeps its
+        // lock, and so must the padlock that mirrors the state.
+        val wasLocked = view.isLocked()
         val rescued = nx != view.screenX || ny != view.screenY
-        if (rescued) {
+        if (rescued && wasLocked) {
             Log.i(TAG, "display changed; unlocking and pulling the button back into view")
             view.setLocked(false)
+            lock?.setLocked(false)
         }
         view.screenX = nx
         view.screenY = ny

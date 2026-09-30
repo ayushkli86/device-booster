@@ -6,6 +6,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
@@ -38,6 +39,20 @@ class OverlayView(private val context: Context) {
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val handler = Handler(Looper.getMainLooper())
     private val density = context.resources.displayMetrics.density
+
+    /** Real display size in pixels, so dragged windows can be clamped on screen. */
+    private fun displaySize(): Pair<Int, Int> {
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val b = wm.currentWindowMetrics.bounds
+            b.width() to b.height()
+        } else {
+            val p = android.graphics.Point()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealSize(p)
+            p.x to p.y
+        }
+    }
 
     private var root: LinearLayout? = null
     private var pill: View? = null
@@ -170,7 +185,10 @@ class OverlayView(private val context: Context) {
                 panel.addView(notice("This ROM exposes no tuning hooks to the shell user."))
             }
             for (action in actions) {
-                scrollInner.addView(tunerRow(action))
+                // A one-shot has no off state, so a switch would promise a
+                // reversal that does not exist; it gets a button instead.
+                if (action.reversible) scrollInner.addView(tunerRow(action))
+                else scrollInner.addView(oneShotRow(action))
             }
 
             val gpu = Tuner.gpuTuningAvailable(context)
@@ -295,6 +313,26 @@ class OverlayView(private val context: Context) {
         )
     }
 
+    private fun labelBlock(action: TunerAction): LinearLayout =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            addView(
+                TextView(context).apply {
+                    text = action.label
+                    setTextColor(Color.WHITE)
+                    textSize = 12f
+                },
+            )
+            addView(
+                TextView(context).apply {
+                    text = action.detail
+                    setTextColor(Color.parseColor("#8B94A3"))
+                    textSize = 9f
+                },
+            )
+        }
+
     private fun tunerRow(action: TunerAction): View {
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -302,34 +340,39 @@ class OverlayView(private val context: Context) {
             setPadding(0, dp(6), 0, dp(6))
         }
 
-        val labels = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        labels.addView(
-            TextView(context).apply {
-                text = action.label
-                setTextColor(Color.WHITE)
-                textSize = 12f
-            },
-        )
-        labels.addView(
-            TextView(context).apply {
-                text = action.detail
-                setTextColor(Color.parseColor("#8B94A3"))
-                textSize = 9f
-            },
-        )
-
         val toggle = Switch(context).apply {
+            // Reflect the session's actually applied state; drawing every
+            // switch off made a booster restart look like all changes had
+            // silently reverted.
+            isChecked = Tuner.isApplied(action)
             setOnCheckedChangeListener { button, isChecked ->
                 if (!button.isPressed) return@setOnCheckedChangeListener
                 report(Tuner.apply(context, action, isChecked))
             }
         }
 
-        row.addView(labels)
+        row.addView(labelBlock(action))
         row.addView(toggle)
+        return row
+    }
+
+    /** A one-shot action: run it with a button, since there is nothing to toggle off. */
+    private fun oneShotRow(action: TunerAction): View {
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(6), 0, dp(6))
+        }
+        val run = TextView(context).apply {
+            text = "Run"
+            setTextColor(COLOR_ACCENT)
+            textSize = 12f
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setBackgroundColor(COLOR_BUTTON)
+            setOnClickListener { report(Tuner.apply(context, action, enable = true)) }
+        }
+        row.addView(labelBlock(action))
+        row.addView(run)
         return row
     }
 
@@ -357,6 +400,8 @@ class OverlayView(private val context: Context) {
         var startX = 0
         var startY = 0
         var moved = false
+        var maxW = 0
+        var maxH = 0
 
         header.setOnTouchListener { v, event ->
             when (event.action) {
@@ -366,15 +411,25 @@ class OverlayView(private val context: Context) {
                     startX = params.x
                     startY = params.y
                     moved = false
+                    // Cache the clamp bounds at gesture start: the window
+                    // carries FLAG_LAYOUT_NO_LIMITS, so an unclamped drag
+                    // could park the panel off-screen and lose it. Querying
+                    // window metrics per MOVE would put a binder call on the
+                    // drag hot path.
+                    val (dw, dh) = displaySize()
+                    maxW = (dw - container.width).coerceAtLeast(0)
+                    maxH = (dh - container.height).coerceAtLeast(0)
                 }
 
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.rawX - downRawX
                     val dy = event.rawY - downRawY
                     if (!moved && (abs(dx) > touchSlop || abs(dy) > touchSlop)) moved = true
-                    params.x = startX + dx.roundToInt()
-                    params.y = startY + dy.roundToInt()
-                    runCatching { windowManager.updateViewLayout(container, params) }
+                    if (moved) {
+                        params.x = (startX + dx.roundToInt()).coerceIn(0, maxW)
+                        params.y = (startY + dy.roundToInt()).coerceIn(0, maxH)
+                        runCatching { windowManager.updateViewLayout(container, params) }
+                    }
                 }
 
                 MotionEvent.ACTION_UP -> if (!moved) toggleExpanded()
@@ -411,7 +466,14 @@ class OverlayView(private val context: Context) {
 
     private fun rebuild() {
         val wasOpen = body?.visibility == View.VISIBLE
+        // The panel is re-added with the same LayoutParams object, but its
+        // x/y are whatever the drag last wrote; keep the user's placement
+        // instead of letting it snap or drift.
+        val savedX = params.x
+        val savedY = params.y
         hide()
+        params.x = savedX
+        params.y = savedY
         runCatching { show() }.onFailure {
             Log.e(TAG, "rebuild failed", it)
             toast("Panel could not be rebuilt")

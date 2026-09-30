@@ -220,38 +220,44 @@ class MainActivity : FlutterActivity() {
                 result.success(null)
             }
 
-            "probeActions" -> {
-                val actions = Tuner.availableActions(this).map { action ->
-                    mapOf(
-                        "id" to action.id,
-                        "label" to action.label,
-                        "detail" to action.detail,
-                        "reversible" to action.reversible,
-                    )
-                }
-                result.success(
+            "probeActions" -> shellAsync(
+                block = {
+                    val actions = Tuner.availableActions(this).map { action ->
+                        mapOf(
+                            "id" to action.id,
+                            "label" to action.label,
+                            "detail" to action.detail,
+                            "reversible" to action.reversible,
+                        )
+                    }
                     mapOf(
                         "actions" to actions,
                         "gpuTuning" to Tuner.gpuTuningAvailable(this),
-                    ),
-                )
-            }
-
-            "probeTierActions" -> {
-                val tiers = Tuner.availableTierActions(this).map { action ->
-                    mapOf(
-                        "id" to action.id,
-                        "label" to action.label,
-                        "detail" to action.detail,
-                        "note" to action.note,
-                        "tiers" to action.tiers.map {
-                            mapOf("id" to it.id, "label" to it.label, "value" to it.value)
-                        },
-                        "current" to (Tuner.currentTier(this, action)?.id ?: ""),
                     )
-                }
-                result.success(mapOf("tierActions" to tiers))
-            }
+                },
+                onDone = { result.success(it) },
+                onError = { result.error("probe_failed", it.message ?: "probe failed", null) },
+            )
+
+            "probeTierActions" -> shellAsync(
+                block = {
+                    val tiers = Tuner.availableTierActions(this).map { action ->
+                        mapOf(
+                            "id" to action.id,
+                            "label" to action.label,
+                            "detail" to action.detail,
+                            "note" to action.note,
+                            "tiers" to action.tiers.map {
+                                mapOf("id" to it.id, "label" to it.label, "value" to it.value)
+                            },
+                            "current" to (Tuner.currentTier(this, action)?.id ?: ""),
+                        )
+                    }
+                    mapOf("tierActions" to tiers)
+                },
+                onDone = { result.success(it) },
+                onError = { result.error("probe_failed", it.message ?: "probe failed", null) },
+            )
 
             "runTierAction" -> {
                 val id = call.argument<String>("id")
@@ -261,41 +267,43 @@ class MainActivity : FlutterActivity() {
                     result.error("unknown_tier", "No tier action $id/$tierId", null)
                     return
                 }
-                val cmd = action.commandFor(tierId)
-                if (cmd == null) {
+                if (action.commandFor(tierId) == null) {
                     result.error("unknown_tier", "No tier $tierId on $id", null)
                     return
                 }
-                // device_config put exits 0 even when it refuses, so verify the
-                // value actually changed instead of trusting the exit code.
-                Tuner.applyTier(this, action, tierId)
-                val now = Tuner.currentTier(this, action)?.id
-                if (now == tierId) {
-                    result.success("ok")
-                } else {
-                    result.error(
-                        "tier_failed",
-                        "The system kept the previous value.",
-                        null,
-                    )
-                }
-            }
-
-            "computilityLevels" -> {
-                result.success(
-                    runCatching { Tuner.computilityLevels(this) }
-                        .getOrElse {
-                            Log.w(TAG, "could not read computility levels", it)
-                            mapOf(
-                                "cpuLevel" to "",
-                                "gpuLevel" to "",
-                                "version" to "",
-                                "present" to false,
-                                "writable" to false,
-                            )
-                        },
+                shellAsync(
+                    block = {
+                        // device_config put exits 0 even when it refuses, so
+                        // verify the value actually changed instead of trusting
+                        // the exit code.
+                        Tuner.applyTier(this, action, tierId)
+                        val now = Tuner.currentTier(this, action)?.id
+                        check(now == tierId) { "The system kept the previous value." }
+                        "ok"
+                    },
+                    onDone = { result.success(it) },
+                    onError = {
+                        result.error("tier_failed", it.message ?: "tier failed", null)
+                    },
                 )
             }
+
+            "computilityLevels" -> shellAsync(
+                block = { Tuner.computilityLevels(this) },
+                onDone = { result.success(it) },
+                onError = {
+                    Log.w(TAG, "could not read computility levels", it)
+                    result.success(
+                        mapOf(
+                            "cpuLevel" to "",
+                            "gpuLevel" to "",
+                            "version" to "",
+                            "present" to false,
+                            "writable" to false,
+                        ),
+                    )
+                },
+            )
 
             "runAction" -> {
                 val id = call.argument<String>("id")
@@ -305,9 +313,10 @@ class MainActivity : FlutterActivity() {
                     result.error("unknown_action", "No action with id $id", null)
                     return
                 }
-                Tuner.apply(this, action, enable).fold(
-                    onSuccess = { result.success("ok") },
-                    onFailure = {
+                shellAsync(
+                    block = { Tuner.apply(this, action, enable).getOrThrow() },
+                    onDone = { result.success("ok") },
+                    onError = {
                         Log.w(TAG, "action $id failed", it)
                         result.error(
                             "action_failed",
@@ -410,6 +419,37 @@ class MainActivity : FlutterActivity() {
             }
 
             else -> result.notImplemented()
+        }
+    }
+
+    /**
+     * Runs [block] on the shell worker and delivers [onDone] on the main
+     * thread. Shizuku shells block on `waitFor`; probes ran inline and froze
+     * the UI for as long as a slow `cmd` took.
+     */
+    private fun <T> shellAsync(
+        block: () -> T,
+        onDone: (T) -> Unit,
+        onError: (Exception) -> Unit,
+    ) {
+        ShizukuHelper.shellExecutor.execute {
+            val outcome = runCatching { block() }
+            runOnUiThread {
+                // The reply can land after the engine is gone (user backed out
+                // mid-probe); delivering to a dead channel throws, so it is
+                // logged rather than allowed to escape.
+                runCatching {
+                    outcome.fold(
+                        onSuccess = {
+                            @Suppress("UNCHECKED_CAST")
+                            onDone(it as T)
+                        },
+                        onFailure = { e ->
+                            onError(e as? Exception ?: Exception(e.message ?: e.toString()))
+                        },
+                    )
+                }.onFailure { Log.w(TAG, "could not deliver a bridge result", it) }
+            }
         }
     }
 

@@ -131,7 +131,10 @@ object Tuner {
             label = "Keep screen awake while charging",
             detail = "Stops the display sleeping while the device is plugged in.",
             needsShizuku = true,
-            probe = "svc power stayon true 2>/dev/null || settings get global stay_on_while_plugged_in",
+            // A read-only probe: the previous `svc power stayon true || ...`
+            // form enabled the very setting it was only meant to test, so
+            // merely listing the row silently turned the feature on.
+            probe = "settings get global stay_on_while_plugged_in",
             enable = "settings put global stay_on_while_plugged_in 7",
             disable = "settings put global stay_on_while_plugged_in 0",
         ),
@@ -212,13 +215,26 @@ object Tuner {
 
     fun apply(context: Context, action: TunerAction, enable: Boolean) =
         ShizukuHelper.shell(context, if (enable) action.enable else action.disable)
+            .also { result ->
+                // The settings have no cheap read-back that separates "we set
+                // it" from "the ROM already had it", so remember what this
+                // session applied. The switches in the overlay reflect this
+                // instead of always drawing off, which made a booster restart
+                // look like every change had silently reverted.
+                synchronized(appliedActions) {
+                    if (result.isSuccess) {
+                        if (enable) appliedActions.add(action.id) else appliedActions.remove(action.id)
+                    }
+                }
+            }
 
-    /**
-     * GPU frequency control is exposed under vendor sysfs trees (Adreno `kgsl`,
-     * Mali `/sys/kernel/gpu`) that are normally root-only. It is listed here so
-     * the UI can state plainly that it is unavailable, rather than implying the
-     * app can do it.
-     */
+    /** Whether this session successfully applied [action] (on = true). */
+    fun isApplied(action: TunerAction): Boolean = synchronized(appliedActions) {
+        action.id in appliedActions
+    }
+
+    private val appliedActions = mutableSetOf<String>()
+
     /**
      * The vendor's own performance tier, read-only.
      *

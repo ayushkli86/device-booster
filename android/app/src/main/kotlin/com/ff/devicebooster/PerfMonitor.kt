@@ -63,8 +63,16 @@ object PerfMonitor {
         val values = parts.drop(1).mapNotNull { it.toLongOrNull() }
         if (values.size < 4) return 0f to false
 
-        val idle = values[0] + values[3]
-        val total = values.sum()
+        // /proc/stat aggregates columns are user, nice, system, idle, iowait,
+        // ... The idle time is column 3 plus iowait in column 4; including
+        // `user` here once made every core report as permanently idle and the
+        // meter pinned near zero.
+        val user = values[0]
+        val nice = values[1]
+        val system = values[2]
+        val idle = values[3] + (values.getOrNull(4) ?: 0L)
+        val total = user + nice + system + idle +
+            values.drop(5).sum()
 
         // A cold first read has no baseline to diff against, so report 0 and
         // let the next tick produce a real number.
@@ -116,13 +124,22 @@ object PerfMonitor {
         val manager = context?.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
         val fromManager = manager?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
         if (fromManager != null && fromManager >= 0) return fromManager
-        return batteryIntent()
-            ?.getIntExtra(BatteryManager.EXTRA_LEVEL, 0)
-            ?: 0
+        // Fallback: level is only meaningful as a fraction of scale, and both
+        // extras come from the same sticky broadcast.
+        val intent = batteryIntent() ?: return 0
+        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        if (level < 0 || scale <= 0) return 0
+        return (level * 100 / scale).coerceIn(0, 100)
     }
 
     private fun isCharging(): Boolean {
-        if (batteryIntent()?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0) return true
+        // A missing broadcast says nothing about the plug; only a definite
+        // EXTRA_PLUGGED value counts. Comparing the null case against 0 once
+        // reported "charging" on every device whose ROM dropped the sticky
+        // broadcast.
+        val plugged = batteryIntent()?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+        if (plugged != null && plugged != 0) return true
         val manager = context?.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
         return manager?.isCharging ?: false
     }

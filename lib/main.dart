@@ -646,10 +646,13 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(height: 4),
             Text(
-              _trickRunning
-                  ? 'Showing on screen. It never takes the touch: a tap reaches '
-                      'the app underneath, and only a drag moves it.'
-                  : 'A draggable ring with a dot in the middle, over any app.',
+              !_trickRunning
+                  ? 'A draggable ring with a dot in the middle, over any app.'
+                  : _trickLocked
+                      ? 'Locked on screen: taps pass straight through to the '
+                          'app underneath. Tap the padlock to unlock and drag.'
+                      : 'Showing on screen. Drag to move it - pull speed and '
+                          'over-pull protection apply while you drag.',
               style: theme.textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
