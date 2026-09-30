@@ -524,9 +524,9 @@ class _HomePageState extends State<HomePage> {
                 Expanded(child: Text('Trick button', style: theme.textTheme.titleMedium)),
                 Switch(
                   value: _trickEnabled,
-                  onChanged: _trickEnabled
-                      ? (v) => unawaited(_saveTrick({'enabled': v}))
-                      : null,
+                  // Never null: a disabled switch would strand the user in
+                  // the off state with no way to turn it back on.
+                  onChanged: (v) => unawaited(_saveTrick({'enabled': v})),
                 ),
               ],
             ),

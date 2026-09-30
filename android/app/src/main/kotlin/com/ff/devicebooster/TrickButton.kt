@@ -29,7 +29,12 @@ class TrickButton @JvmOverloads constructor(
 ) : View(context, attrs) {
 
     private var config = TrickButtonConfig()
-    private var active = false
+
+    // `armed` is the persistent user state (toggled by a tap and shown as a
+    // cross). `pressed` is transient finger-down feedback only. Keeping them
+    // separate stops ACTION_DOWN from clobbering the armed state on ACTION_UP.
+    private var armed = false
+    private var pressed = false
 
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
@@ -71,11 +76,17 @@ class TrickButton @JvmOverloads constructor(
 
     fun currentConfig(): TrickButtonConfig = config
 
-    fun isActive(): Boolean = active
+    fun isActive(): Boolean = armed
 
     fun setActive(value: Boolean) {
-        if (active == value) return
-        active = value
+        if (armed == value) return
+        armed = value
+        invalidate()
+    }
+
+    private fun updatePressed(value: Boolean) {
+        if (pressed == value) return
+        pressed = value
         invalidate()
     }
 
@@ -106,7 +117,7 @@ class TrickButton @JvmOverloads constructor(
         val ringRadius = outer - ringWidth / 2f - 2f * density
         if (ringRadius > 0f) canvas.drawCircle(cx, cy, ringRadius, ringPaint)
 
-        if (active) {
+        if (armed) {
             // Armed: the dot becomes a cross, so the state is unmistakable.
             crossPaint.color = applyAlpha(config.dotColor, alpha)
             crossPaint.strokeWidth = (config.borderDp * density).coerceAtLeast(2f)
@@ -115,7 +126,8 @@ class TrickButton @JvmOverloads constructor(
             canvas.drawLine(cx - arm, cy + arm, cx + arm, cy - arm, crossPaint)
         } else {
             dotPaint.color = applyAlpha(config.dotColor, alpha)
-            canvas.drawCircle(cx, cy, (outer * 0.22f).coerceAtLeast(1f), dotPaint)
+            val dotRadius = (outer * if (pressed) 0.28f else 0.22f).coerceAtLeast(1f)
+            canvas.drawCircle(cx, cy, dotRadius, dotPaint)
         }
     }
 
@@ -131,7 +143,7 @@ class TrickButton @JvmOverloads constructor(
                 startX = screenX
                 startY = screenY
                 dragging = false
-                setActive(true)
+                updatePressed(true)
             }
 
             MotionEvent.ACTION_MOVE -> {
@@ -162,13 +174,15 @@ class TrickButton @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_UP -> {
+                // Toggle first, then clear only the pressed state so the
+                // freshly armed state survives the finger lift.
                 if (!dragging) onTapped?.invoke()
-                setActive(false)
+                updatePressed(false)
                 onSettled?.invoke(config)
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                setActive(false)
+                updatePressed(false)
                 onSettled?.invoke(config)
             }
         }

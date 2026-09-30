@@ -4,12 +4,49 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  // Mirrors the native SharedPreferences store so a save is visible to the
+  // config reload that follows it; a static map would snap the switch back to
+  // its default and hide exactly the bug this suite guards against.
+  final trickConfig = <String, dynamic>{
+    'enabled': true,
+    'sizeDp': 76,
+    'borderDp': 4,
+    'opacity': 85,
+    'preventOverPull': true,
+    'pullSpeed': 1.0,
+    'ringColor': 0xFF7EE787,
+    'dotColor': 0xFFFF6B6B,
+    'backColor': 0xFF101418,
+  };
+  final trickSaves = <Map<Object?, Object?>>[];
+
   setUp(() {
+    trickConfig
+      ..clear()
+      ..addAll(const {
+        'enabled': true,
+        'sizeDp': 76,
+        'borderDp': 4,
+        'opacity': 85,
+        'preventOverPull': true,
+        'pullSpeed': 1.0,
+        'ringColor': 0xFF7EE787,
+        'dotColor': 0xFFFF6B6B,
+        'backColor': 0xFF101418,
+      });
+    trickSaves.clear();
+
     // The home page talks to a native MethodChannel on first frame; stub it so
     // the widget tree can be pumped without a live Android side.
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(const MethodChannel('com.ff.devicebooster/bridge'),
             (call) async {
+          if (call.method == 'trickSave') {
+            final changes = (call.arguments as Map).cast<Object?, Object?>();
+            trickSaves.add(changes);
+            trickConfig.addAll(changes.cast<String, dynamic>());
+            return true;
+          }
           return switch (call.method) {
             'shizukuStatus' => <String, dynamic>{
                 'running': false,
@@ -18,19 +55,8 @@ void main() {
               },
             'canDrawOverlays' => false,
             'probeActions' => <String, dynamic>{'actions': <dynamic>[], 'gpuTuning': false},
-            'trickConfig' => <String, dynamic>{
-              'enabled': true,
-              'sizeDp': 76,
-              'borderDp': 4,
-              'opacity': 85,
-              'preventOverPull': true,
-              'pullSpeed': 1.0,
-              'ringColor': 0xFF7EE787,
-              'dotColor': 0xFFFF6B6B,
-              'backColor': 0xFF101418,
-            },
+            'trickConfig' => Map<String, dynamic>.from(trickConfig),
             'trickRunning' => false,
-            'trickSave' => true,
             'trickStart' => true,
             'trickStop' => true,
             'sample' => <String, dynamic>{
@@ -112,6 +138,40 @@ void main() {
       ),
     );
     expect(button.onPressed, isNull);
+  });
+
+  testWidgets('trick button switch can be turned off and back on',
+      (WidgetTester tester) async {
+    await tester.pumpWidget(const BoosterApp());
+    await settleInitialLoad(tester);
+
+    await tester.scrollUntilVisible(find.text('Trick button'), 200);
+
+    // The switch that lives in the same header Row as the 'Trick button' title.
+    final headerRow = find
+        .ancestor(of: find.text('Trick button'), matching: find.byType(Row))
+        .first;
+    final toggle = find.descendant(of: headerRow, matching: find.byType(Switch));
+
+    expect(tester.widget<Switch>(toggle).value, isTrue);
+
+    // Off...
+    await tester.tap(toggle);
+    await settleInitialLoad(tester);
+    expect(tester.widget<Switch>(toggle).value, isFalse,
+        reason: 'tapping the switch must persist the disabled state');
+
+    // ...and back on again. A switch that disables its own onChanged when off
+    // would strand the user here with no way to re-enable the button.
+    await tester.tap(toggle);
+    await settleInitialLoad(tester);
+    expect(tester.widget<Switch>(toggle).value, isTrue,
+        reason: 'a disabled trick button must still be re-enableable');
+
+    expect(
+      trickSaves.where((m) => m.containsKey('enabled')).map((m) => m['enabled']),
+      [false, true],
+    );
   });
 
   testWidgets('shows a failure instead of a blank screen when the bridge throws',
