@@ -21,17 +21,23 @@ import kotlin.math.roundToInt
  * without the rest of the booster panel.
  *
  * The window is sized to the button and carries FLAG_NOT_TOUCH_MODAL, which is
- * what lets touches outside the button reach the app underneath while touches
- * on the button are consumed here. Enlarging this window to full screen would
- * break that split and swallow the whole screen.
+ * what lets touches outside the button reach the app underneath. While unlocked
+ * touches on the button are consumed here for dragging; while locked the window
+ * also carries FLAG_NOT_TOUCHABLE, so taps pass through to the app underneath
+ * (see [applyTouchability]). Enlarging this window to full screen would break
+ * that split and swallow the whole screen.
  */
-class TrickButtonService : Service(), TrickButton.Listener {
+class TrickButtonService : Service(), TrickButton.Listener, LockControl.Listener {
 
     private var button: TrickButton? = null
     private var params: WindowManager.LayoutParams? = null
 
     /** True only between a successful addView and its matching removeView. */
     private var attached = false
+
+    private var lock: LockControl? = null
+    private var lockParams: WindowManager.LayoutParams? = null
+    private var lockAttached = false
 
     /** Set in onDestroy so in-flight touch callbacks no-op instead of crashing. */
     private var dead = false
@@ -96,7 +102,177 @@ class TrickButtonService : Service(), TrickButton.Listener {
             Log.e(TAG, "could not add the trick button window", t)
             button = null
             stopSelf()
+            return
         }
+
+        attachLockWindow(config)
+        applyTouchability()
+    }
+
+    /**
+     * Adds the padlock as a second, independently draggable window.
+     *
+     * It is separate so it can sit anywhere on screen, and so the button window
+     * stays sized to the button: a larger window would take touches that belong
+     * to the app underneath. A failure here is not fatal, because the button is
+     * still usable and the notification can still lock it.
+     */
+    private fun attachLockWindow(config: TrickButtonConfig) {
+        val sizePx =
+            (TrickButtonConfig.LOCK_SIZE * resources.displayMetrics.density).roundToInt()
+        val view = LockControl(this).apply {
+            setLocked(config.locked)
+            refreshBounds()
+            val b = screenBounds()
+            // First run: park it clear of the button rather than at the raw
+            // default, which would leave it jammed against the top edge. Either
+            // way it is clamped, since a saved position can come from a larger
+            // display.
+            screenX = TrickButtonMath.clampToScreen(
+                if (config.lockX < 0) config.x - sizePx * 2 else config.lockX,
+                b[1],
+            )
+            screenY = TrickButtonMath.clampToScreen(
+                if (config.lockY < 0) config.y else config.lockY,
+                b[3],
+            )
+            listener = this@TrickButtonService
+        }
+        lock = view
+
+        val p = WindowManager.LayoutParams(
+            sizePx,
+            sizePx,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = view.screenX
+            y = view.screenY
+        }
+        lockParams = p
+
+        try {
+            wm.addView(view, p)
+            lockAttached = true
+        } catch (t: Throwable) {
+            Log.e(TAG, "could not add the lock control window", t)
+            lock = null
+            lockParams = null
+        }
+    }
+
+    /**
+     * Pulls the padlock back inside the display after a rotation or a settings
+     * change. A lock that drifted off screen could not be tapped to unlock, so it
+     * is never left outside the bounds.
+     */
+    private fun rePlaceLock(config: TrickButtonConfig) {
+        val view = lock ?: return
+        val p = lockParams ?: return
+        view.refreshBounds()
+        val b = view.screenBounds()
+        val nx = TrickButtonMath.clampToScreen(view.screenX, b[1])
+        val ny = TrickButtonMath.clampToScreen(view.screenY, b[3])
+        view.screenX = nx
+        view.screenY = ny
+        p.x = nx
+        p.y = ny
+        if (!lockAttached) return
+        try {
+            wm.updateViewLayout(view, p)
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not re-place the lock after a display change", t)
+        }
+        TrickButtonStore.save(
+            this,
+            (button?.currentConfig() ?: config).copy(
+                x = button?.screenX ?: config.x,
+                y = button?.screenY ?: config.y,
+                lockX = nx,
+                lockY = ny,
+            ),
+        )
+    }
+
+    /**
+     * A locked button must not take touches: the tap has to reach the app
+     * underneath, and the button must not arm. `FLAG_NOT_TOUCHABLE` is what
+     * makes the window transparent to input, which also pins it, since a drag
+     * can no longer reach it. Pull speed and over-pull prevention still apply
+     * whenever it is unlocked.
+     */
+    private fun applyTouchability() {
+        val p = params ?: return
+        val view = button ?: return
+        val base = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+        val target = if (view.isLocked()) {
+            base or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        } else {
+            base
+        }
+        if (p.flags == target) return
+        p.flags = target
+        if (!attached) return
+        try {
+            wm.updateViewLayout(view, p)
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not change the button's touchability", t)
+        }
+    }
+
+    // --- LockControl.Listener -------------------------------------------------
+
+    override fun onLockMoved(x: Int, y: Int) {
+        if (dead || !lockAttached) return
+        val p = lockParams ?: return
+        val view = lock ?: return
+        p.x = x
+        p.y = y
+        try {
+            wm.updateViewLayout(view, p)
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not move the lock window", t)
+        }
+    }
+
+    override fun onLockSettled(x: Int, y: Int) {
+        if (dead) return
+        val view = lock ?: return
+        val button = button ?: return
+        TrickButtonStore.save(
+            this,
+            button.currentConfig().copy(
+                x = button.screenX,
+                y = button.screenY,
+                locked = view.isLocked(),
+                lockX = x,
+                lockY = y,
+            ),
+        )
+    }
+
+    override fun onLockToggled(locked: Boolean) {
+        if (dead) return
+        val view = lock ?: return
+        val button = button ?: return
+        // Keep both windows showing the same state, whichever one was touched.
+        button.setLocked(locked)
+        applyTouchability()
+        TrickButtonStore.save(
+            this,
+            button.currentConfig().copy(
+                x = button.screenX,
+                y = button.screenY,
+                locked = locked,
+                lockX = view.screenX,
+                lockY = view.screenY,
+            ),
+        )
+        notify(buildNotification(stateText(button)))
     }
 
     // --- TrickButton.Listener -------------------------------------------------
@@ -119,32 +295,21 @@ class TrickButtonService : Service(), TrickButton.Listener {
     override fun onSettled(config: TrickButtonConfig) {
         if (dead) return
         val view = button ?: return
-        TrickButtonStore.save(this, config.copy(x = view.screenX, y = view.screenY))
-    }
-
-    override fun onTap() {
-        if (dead) return
-        val view = button ?: return
-        val nowArmed = !view.isActive()
-        view.setActive(nowArmed)
-        notify(buildNotification(stateText(view)))
-    }
-
-    override fun onLockChanged(locked: Boolean) {
-        if (dead) return
-        val view = button ?: return
         TrickButtonStore.save(
             this,
-            view.currentConfig().copy(x = view.screenX, y = view.screenY, locked = locked),
+            config.copy(
+                x = view.screenX,
+                y = view.screenY,
+                // The padlock owns these; the button has no say in them.
+                lockX = lock?.screenX ?: config.lockX,
+                lockY = lock?.screenY ?: config.lockY,
+            ),
         )
-        notify(buildNotification(stateText(view)))
     }
 
-    private fun stateText(view: TrickButton): String {
-        val armed = if (view.isActive()) "armed" else "idle"
-        val locked = if (view.isLocked()) ", locked" else ""
-        return "Trick button: $armed$locked"
-    }
+    private fun stateText(view: TrickButton): String =
+        if (view.isLocked()) "Trick button: locked in place" else "Trick button: drag to move"
+
 
     private fun notify(n: Notification) {
         try {
@@ -232,12 +397,16 @@ class TrickButtonService : Service(), TrickButton.Listener {
                 if (view != null && !dead) {
                     val target = intent.getBooleanExtra(EXTRA_LOCKED, false)
                     view.setLocked(target)
+                    lock?.setLocked(target)
+                    applyTouchability()
                     TrickButtonStore.save(
                         this,
                         view.currentConfig().copy(
                             x = view.screenX,
                             y = view.screenY,
                             locked = target,
+                            lockX = lock?.screenX ?: view.currentConfig().lockX,
+                            lockY = lock?.screenY ?: view.currentConfig().lockY,
                         ),
                     )
                     notify(buildNotification(stateText(view)))
@@ -270,6 +439,10 @@ class TrickButtonService : Service(), TrickButton.Listener {
                             Log.w(TAG, "resize failed", t)
                         }
                     }
+                    view.setLocked(next.locked)
+                    lock?.setLocked(next.locked)
+                    applyTouchability()
+                    rePlaceLock(next)
                     notify(buildNotification(stateText(view)))
                 }
                 return START_STICKY
@@ -302,11 +475,13 @@ class TrickButtonService : Service(), TrickButton.Listener {
         view.screenY = ny
         p.x = nx
         p.y = ny
+        applyTouchability()
         try {
             wm.updateViewLayout(view, p)
         } catch (t: Throwable) {
             Log.w(TAG, "could not re-place the button after a display change", t)
         }
+        rePlaceLock(view.currentConfig())
     }
 
     override fun onDestroy() {
@@ -328,6 +503,30 @@ class TrickButtonService : Service(), TrickButton.Listener {
                 attached = false
             }
         }
+        val lockView = lock
+        if (lockView != null) {
+            TrickButtonStore.save(
+                this,
+                (button?.currentConfig() ?: TrickButtonConfig()).copy(
+                    x = button?.screenX ?: 0,
+                    y = button?.screenY ?: 0,
+                    locked = lockView.isLocked(),
+                    lockX = lockView.screenX,
+                    lockY = lockView.screenY,
+                ),
+            )
+            if (lockAttached) {
+                try {
+                    wm.removeView(lockView)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "lock control removal failed", t)
+                }
+                lockAttached = false
+            }
+        }
+        lock = null
+        lockParams = null
+
         button = null
         params = null
         stopForeground(STOP_FOREGROUND_REMOVE)

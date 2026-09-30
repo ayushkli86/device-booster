@@ -237,6 +237,66 @@ class MainActivity : FlutterActivity() {
                 )
             }
 
+            "probeTierActions" -> {
+                val tiers = Tuner.availableTierActions(this).map { action ->
+                    mapOf(
+                        "id" to action.id,
+                        "label" to action.label,
+                        "detail" to action.detail,
+                        "note" to action.note,
+                        "tiers" to action.tiers.map {
+                            mapOf("id" to it.id, "label" to it.label, "value" to it.value)
+                        },
+                        "current" to (Tuner.currentTier(this, action)?.id ?: ""),
+                    )
+                }
+                result.success(mapOf("tierActions" to tiers))
+            }
+
+            "runTierAction" -> {
+                val id = call.argument<String>("id")
+                val tierId = call.argument<String>("tierId")
+                val action = Tuner.TIER_ACTIONS.firstOrNull { it.id == id }
+                if (action == null || tierId == null) {
+                    result.error("unknown_tier", "No tier action $id/$tierId", null)
+                    return
+                }
+                val cmd = action.commandFor(tierId)
+                if (cmd == null) {
+                    result.error("unknown_tier", "No tier $tierId on $id", null)
+                    return
+                }
+                // device_config put exits 0 even when it refuses, so verify the
+                // value actually changed instead of trusting the exit code.
+                Tuner.applyTier(this, action, tierId)
+                val now = Tuner.currentTier(this, action)?.id
+                if (now == tierId) {
+                    result.success("ok")
+                } else {
+                    result.error(
+                        "tier_failed",
+                        "The system kept the previous value.",
+                        null,
+                    )
+                }
+            }
+
+            "computilityLevels" -> {
+                result.success(
+                    runCatching { Tuner.computilityLevels(this) }
+                        .getOrElse {
+                            Log.w(TAG, "could not read computility levels", it)
+                            mapOf(
+                                "cpuLevel" to "",
+                                "gpuLevel" to "",
+                                "version" to "",
+                                "present" to false,
+                                "writable" to false,
+                            )
+                        },
+                )
+            }
+
             "runAction" -> {
                 val id = call.argument<String>("id")
                 val enable = call.argument<Boolean>("enable") ?: true
@@ -393,6 +453,10 @@ class MainActivity : FlutterActivity() {
             x = base.x,
             y = base.y,
             locked = bool("locked", base.locked),
+            // The padlock is dragged on the overlay, not set from this screen, so
+            // its position has to be carried over or a save would teleport it.
+            lockX = base.lockX,
+            lockY = base.lockY,
         ).clamped()
     }
 

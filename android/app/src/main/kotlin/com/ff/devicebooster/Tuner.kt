@@ -22,6 +22,36 @@ data class TunerAction(
     val reversible: Boolean get() = disable.isNotBlank()
 }
 
+/** One selectable step of a [TunerTierAction]. */
+data class TunerTier(
+    val id: String,
+    val label: String,
+    val value: String,
+)
+
+/**
+ * An action with several discrete settings rather than an on/off switch.
+ *
+ * [note] is shown in the UI and must state anything the user cannot see for
+ * themselves, such as a setting that does not survive a reboot.
+ */
+data class TunerTierAction(
+    val id: String,
+    val label: String,
+    val detail: String,
+    val note: String,
+    val needsShizuku: Boolean,
+    val namespace: String,
+    val key: String,
+    val probe: String,
+    val read: String,
+    val tiers: List<TunerTier>,
+) {
+    fun commandFor(tierId: String): String? =
+        tiers.firstOrNull { it.id == tierId }
+            ?.let { "device_config put $namespace $key ${it.value}" }
+}
+
 object Tuner {
 
     /**
@@ -119,6 +149,59 @@ object Tuner {
         ),
     )
 
+    /**
+     * Phantom processes are child processes an app forks that do not get their
+     * own UID: terminal emulators, toolchains, and anything spawning helpers.
+     * The platform caps how many may exist at once, and the newest is killed
+     * past the cap, which is what makes heavy multi-process tools die in the
+     * background.
+     *
+     * The tier ladder is deliberately capped at 1024, which is what this vendor
+     * build ships. Higher values are accepted by `device_config` without
+     * complaint - a probe on this device took 2147483647 - but a per-process
+     * heap growth limit of 256MB means an unbounded cap only buys OOM kills.
+     */
+    private val PHANTOM_TIERS = TunerTierAction(
+        id = "phantom_processes",
+        label = "Phantom process limit",
+        detail = "How many unowned child processes may exist before the " +
+            "platform starts killing the newest. Raise it to keep terminal " +
+            "sessions, emulators and build tools alive in the background.",
+        note = "Held in memory only - this build's device_config has no " +
+            "persistent store, so the value returns to the system default " +
+            "(1024) after a reboot.",
+        needsShizuku = true,
+        namespace = "activity_manager",
+        key = "max_phantom_processes",
+        probe = "device_config get activity_manager max_phantom_processes",
+        read = "device_config get activity_manager max_phantom_processes",
+        tiers = listOf(
+            TunerTier("low", "Low - 32 (Android default)", "32"),
+            TunerTier("mid", "Mid - 128", "128"),
+            TunerTier("high", "High - 512", "512"),
+            TunerTier("max", "Max - 1024 (this build's default)", "1024"),
+        ),
+    )
+
+    val TIER_ACTIONS: List<TunerTierAction> = listOf(PHANTOM_TIERS)
+
+    /** Returns only tier actions this device actually supports. */
+    fun availableTierActions(context: Context): List<TunerTierAction> {
+        if (!ShizukuHelper.isGranted()) return emptyList()
+        return TIER_ACTIONS.filter { ShizukuHelper.shell(context, it.probe).isSuccess }
+    }
+
+    /** The tier matching the device's current value, or null if unrecognised. */
+    fun currentTier(context: Context, action: TunerTierAction): TunerTier? {
+        val raw = ShizukuHelper.shell(context, action.read).getOrNull()?.trim()
+        return action.tiers.firstOrNull { it.value == raw }
+    }
+
+    fun applyTier(context: Context, action: TunerTierAction, tierId: String) {
+        val cmd = action.commandFor(tierId) ?: return
+        ShizukuHelper.shell(context, cmd)
+    }
+
     /** Runs the probe for each action and returns only those this device supports. */
     fun availableActions(context: Context): List<TunerAction> {
         if (!ShizukuHelper.isGranted()) return emptyList()
@@ -136,6 +219,33 @@ object Tuner {
      * the UI can state plainly that it is unavailable, rather than implying the
      * app can do it.
      */
+    /**
+     * The vendor's own performance tier, read-only.
+     *
+     * `persist.sys.computility.cpulevel` / `.gpulevel` do exist on HyperOS
+     * (alongside `computility.version`) and are readable, but they are refused
+     * to uid 2000: measured on an MT6769, `setprop` fails for the `persist.*`
+     * class as a whole, while a control `debug.*` prop writes fine. Shizuku
+     * runs as uid 2000 in `u:r:shell:s0`, so it inherits the same refusal, and
+     * only root could change these. The app therefore reports the level it is
+     * actually running at instead of offering a switch that cannot move it.
+     */
+    fun computilityLevels(context: Context): Map<String, Any> {
+        fun read(prop: String): String? =
+            ShizukuHelper.shell(context, "getprop $prop").getOrNull()?.trim()?.ifEmpty { null }
+
+        val cpu = read("persist.sys.computility.cpulevel")
+        val gpu = read("persist.sys.computility.gpulevel")
+        val version = read("persist.sys.computility.version")
+        return mapOf(
+            "cpuLevel" to (cpu ?: ""),
+            "gpuLevel" to (gpu ?: ""),
+            "version" to (version ?: ""),
+            "present" to (cpu != null || gpu != null),
+            "writable" to false,
+        )
+    }
+
     fun gpuTuningAvailable(context: Context): Boolean {
         if (!ShizukuHelper.isGranted()) return false
         val probe = ShizukuHelper.shell(

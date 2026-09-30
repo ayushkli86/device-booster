@@ -43,7 +43,7 @@ class BridgeFailure implements Exception {
 
 /// A faithful preview of the trick button, drawn the same way the native
 /// [TrickButton] draws it: a high-contrast disc, a coloured ring, and a
-/// centre dot that becomes a cross when armed.
+/// centre dot.
 class _TrickPreview extends StatelessWidget {
   const _TrickPreview({
     required this.sizeDp,
@@ -52,7 +52,6 @@ class _TrickPreview extends StatelessWidget {
     required this.ringColor,
     required this.dotColor,
     required this.backColor,
-    required this.active,
     required this.locked,
   });
 
@@ -62,7 +61,6 @@ class _TrickPreview extends StatelessWidget {
   final Color ringColor;
   final Color dotColor;
   final Color backColor;
-  final bool active;
   final bool locked;
 
   @override
@@ -85,7 +83,7 @@ class _TrickPreview extends StatelessWidget {
             ? Stack(
                 alignment: Alignment.topCenter,
                 children: [
-                  _face(px, border, a, ringColor, dotColor, active),
+                  _face(px, border, a, ringColor, dotColor),
                   Padding(
                     padding: EdgeInsets.only(top: px * 0.12),
                     child: Icon(
@@ -96,7 +94,7 @@ class _TrickPreview extends StatelessWidget {
                   ),
                 ],
               )
-            : _face(px, border, a, ringColor, dotColor, active),
+            : _face(px, border, a, ringColor, dotColor),
       ),
     );
   }
@@ -107,7 +105,6 @@ class _TrickPreview extends StatelessWidget {
     double a,
     Color ringColor,
     Color dotColor,
-    bool active,
   ) =>
       Center(
           child: Container(
@@ -121,20 +118,14 @@ class _TrickPreview extends StatelessWidget {
               ),
             ),
             child: Center(
-              child: active
-                  ? Icon(
-                      Icons.close,
-                      size: (px * 0.42).clamp(8.0, 90.0),
-                      color: dotColor.withValues(alpha: a),
-                    )
-                  : Container(
-                      width: (px * 0.22).clamp(3.0, 44.0),
-                      height: (px * 0.22).clamp(3.0, 44.0),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: dotColor.withValues(alpha: a),
-                      ),
-                    ),
+              child: Container(
+              width: (px * 0.22).clamp(3.0, 44.0),
+              height: (px * 0.22).clamp(3.0, 44.0),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: dotColor.withValues(alpha: a),
+              ),
+            ),
             ),
           ),
         );
@@ -183,6 +174,8 @@ class _HomePageState extends State<HomePage> {
   bool _canDraw = false;
 
   List<Map<Object?, Object?>> _actions = const [];
+  List<Map<Object?, Object?>> _tierActions = const [];
+  Map<Object?, Object?>? _computility;
   bool? _gpuTuning;
   Map<Object?, Object?>? _sample;
 
@@ -261,6 +254,8 @@ class _HomePageState extends State<HomePage> {
     final canDraw = await _invoke<bool>('canDrawOverlays');
     final probe = await _invoke<Map<Object?, Object?>>('probeActions');
     final sample = await _invoke<Map<Object?, Object?>>('sample');
+    final tierProbe = await _invoke<Map<Object?, Object?>>('probeTierActions');
+    final computility = await _invoke<Map<Object?, Object?>>('computilityLevels');
     await _loadTrick();
 
     if (!mounted) return;
@@ -270,7 +265,14 @@ class _HomePageState extends State<HomePage> {
         ? rawActions.whereType<Map<Object?, Object?>>().toList()
         : const <Map<Object?, Object?>>[];
 
+    final rawTiers = tierProbe?['tierActions'];
+    final tierActions = rawTiers is List
+        ? rawTiers.whereType<Map<Object?, Object?>>().toList()
+        : const <Map<Object?, Object?>>[];
+
     setState(() {
+      _tierActions = tierActions;
+      _computility = computility;
       _shizukuRunning = status?['running'] == true;
       _shizukuGranted = status?['granted'] == true;
       _canDraw = canDraw ?? false;
@@ -343,6 +345,8 @@ class _HomePageState extends State<HomePage> {
           if (_shizukuGranted) ...[
             const SizedBox(height: 16),
             _tuningCard(theme),
+            const SizedBox(height: 16),
+            _performanceCard(theme),
           ],
           const SizedBox(height: 16),
           _trickCard(theme),
@@ -531,6 +535,87 @@ class _HomePageState extends State<HomePage> {
         ),
       );
 
+  /// Tiered settings, plus a plain readout of values the app cannot change.
+  Widget _performanceCard(ThemeData theme) => Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Performance tiers', style: theme.textTheme.titleMedium),
+              const SizedBox(height: 4),
+              Text(
+                'Only settings this device actually supports are listed.',
+                style: theme.textTheme.bodySmall,
+              ),
+              for (final t in _tierActions) ...[
+                const SizedBox(height: 12),
+                Text(t['label'] as String? ?? '', style: theme.textTheme.titleSmall),
+                Text(t['detail'] as String? ?? '', style: theme.textTheme.bodySmall),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final tier
+                        in (t['tiers'] as List? ?? const []).whereType<Map<Object?, Object?>>())
+                      ChoiceChip(
+                        label: Text(tier['label'] as String? ?? ''),
+                        selected: t['current'] == tier['id'],
+                        onSelected: (_) => unawaited(
+                          _guard(() async {
+                            await _invoke('runTierAction', {
+                              'id': t['id'],
+                              'tierId': tier['id'],
+                            });
+                            await _load();
+                          }),
+                        ),
+                      ),
+                  ],
+                ),
+                if ((t['note'] as String? ?? '').isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      t['note'] as String,
+                      style: const TextStyle(color: Colors.orangeAccent, fontSize: 12),
+                    ),
+                  ),
+              ],
+              if (_tierActions.isEmpty && _shizukuGranted)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Text('This ROM exposes no tiered hooks to the shell user.'),
+                ),
+              const SizedBox(height: 16),
+              Text('Vendor performance level', style: theme.textTheme.titleSmall),
+              const SizedBox(height: 4),
+              if (_computility?['present'] == true)
+                Text(
+                  'CPU level ${_computility?['cpuLevel']}  -  '
+                  'GPU level ${_computility?['gpuLevel']}'
+                  '${(_computility?['version'] as String? ?? '').isEmpty ? '' : '  -  computility ${_computility?['version']}'}',
+                  style: theme.textTheme.bodyMedium,
+                )
+              else
+                Text(
+                  'This ROM does not report a computility level.',
+                  style: theme.textTheme.bodySmall,
+                ),
+              const SizedBox(height: 4),
+              Text(
+                'Read-only. HyperOS keeps persist.sys.computility.* read-only for '
+                'the shell user, and Shizuku runs as that same user, so no app '
+                'without root can move it. Reporting it is honest; a switch here '
+                'would do nothing.',
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+      );
+
   Widget _trickCard(ThemeData theme) {
     final preview = _TrickPreview(
       sizeDp: _trickSize,
@@ -539,7 +624,6 @@ class _HomePageState extends State<HomePage> {
       ringColor: Color(_ringColor),
       dotColor: Color(_dotColor),
       backColor: Color(_backColor),
-      active: _trickRunning,
       locked: _trickLocked,
     );
 
@@ -563,7 +647,8 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(height: 4),
             Text(
               _trickRunning
-                  ? 'Showing on screen. Tap it to arm, tap again to disarm.'
+                  ? 'Showing on screen. It never takes the touch: a tap reaches '
+                      'the app underneath, and only a drag moves it.'
                   : 'A draggable ring with a dot in the middle, over any app.',
               style: theme.textTheme.bodySmall,
             ),
@@ -641,9 +726,10 @@ class _HomePageState extends State<HomePage> {
               onChanged: (v) => unawaited(_saveTrick({'locked': v})),
               title: const Text('Lock button position'),
               subtitle: const Text(
-                'Pins the button where it is. It still swallows every touch on '
-                'itself, so nothing leaks to the app underneath. Long press the '
-                'button to toggle this without opening the app.',
+                'Pins the button where it is and stops it taking touches, so '
+                'they fall through to the app underneath. The padlock floats '
+                'free of the button and can be dragged anywhere: tap it to '
+                'switch the lock on (green) or off (red).',
               ),
             ),
             const SizedBox(height: 8),

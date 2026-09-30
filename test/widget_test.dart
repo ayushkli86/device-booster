@@ -20,6 +20,10 @@ void main() {
   };
   final trickSaves = <Map<Object?, Object?>>[];
 
+  // The tuning and performance cards are only rendered once Shizuku is
+  // authorised, so a test that needs them has to flip this.
+  var shizukuGranted = false;
+
   setUp(() {
     trickConfig
       ..clear()
@@ -36,6 +40,7 @@ void main() {
         'locked': false,
       });
     trickSaves.clear();
+    shizukuGranted = false;
 
     // The home page talks to a native MethodChannel on first frame; stub it so
     // the widget tree can be pumped without a live Android side.
@@ -50,11 +55,33 @@ void main() {
           }
           return switch (call.method) {
             'shizukuStatus' => <String, dynamic>{
-                'running': false,
-                'granted': false,
+                'running': shizukuGranted,
+                'granted': shizukuGranted,
                 'text': 'Shizuku is not running - start it, then re-check',
               },
             'canDrawOverlays' => false,
+            'probeTierActions' => <String, dynamic>{
+              'tierActions': <dynamic>[
+                <String, dynamic>{
+                  'id': 'phantom_processes',
+                  'label': 'Phantom process limit',
+                  'detail': 'How many unowned child processes may exist.',
+                  'note': 'Held in memory only.',
+                  'current': 'max',
+                  'tiers': <dynamic>[
+                    <String, dynamic>{'id': 'low', 'label': 'Low', 'value': '32'},
+                    <String, dynamic>{'id': 'max', 'label': 'Max', 'value': '1024'},
+                  ],
+                },
+              ],
+            },
+            'computilityLevels' => <String, dynamic>{
+              'cpuLevel': '1',
+              'gpuLevel': '1',
+              'version': '2025',
+              'present': true,
+              'writable': false,
+            },
             'probeActions' => <String, dynamic>{'actions': <dynamic>[], 'gpuTuning': false},
             'trickConfig' => Map<String, dynamic>.from(trickConfig),
             'trickRunning' => false,
@@ -202,6 +229,30 @@ void main() {
       trickSaves.where((m) => m.containsKey('locked')).map((m) => m['locked']),
       [true, false],
     );
+  });
+
+  testWidgets('shows phantom process tiers and the read-only vendor level',
+      (WidgetTester tester) async {
+    await tester.pumpWidget(const BoosterApp());
+    await settleInitialLoad(tester);
+
+    // The tuning and performance cards only appear once Shizuku is authorised.
+    expect(find.text('Performance tiers'), findsNothing);
+
+    shizukuGranted = true;
+    await tester.tap(find.byIcon(Icons.refresh));
+    await settleInitialLoad(tester);
+
+    await tester.scrollUntilVisible(find.text('Performance tiers'), 200);
+    expect(find.text('Performance tiers'), findsOneWidget);
+    expect(find.text('Phantom process limit'), findsOneWidget);
+    expect(find.text('Held in memory only.'), findsOneWidget);
+    expect(find.text('Low'), findsOneWidget);
+    expect(find.text('Max'), findsOneWidget);
+
+    // The device's actual computility level is reported, not offered as a control.
+    expect(find.textContaining('CPU level 1'), findsOneWidget);
+    expect(find.textContaining('Read-only.'), findsOneWidget);
   });
 
   testWidgets('shows a failure instead of a blank screen when the bridge throws',

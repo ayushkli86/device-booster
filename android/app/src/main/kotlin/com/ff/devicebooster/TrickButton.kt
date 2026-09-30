@@ -5,7 +5,6 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.RectF
 import android.os.Build
 import android.util.AttributeSet
 import android.view.MotionEvent
@@ -30,10 +29,8 @@ class TrickButton @JvmOverloads constructor(
 
     private var config = TrickButtonConfig()
 
-    // `armed` is the persistent user state (toggled by a tap and shown as a
-    // cross). `pressed` is transient finger-down feedback only. Keeping them
-    // separate stops ACTION_DOWN from clobbering the armed state on ACTION_UP.
-    private var armed = false
+    // `pressed` is transient finger-down feedback only; the button has no
+    // latched state, because a tap no longer does anything.
     private var pressed = false
 
     /** When true the position is pinned; see [setLocked]. */
@@ -42,16 +39,6 @@ class TrickButton @JvmOverloads constructor(
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    private val crossPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-    }
-    private val lockPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-    }
-    private val bounds = RectF()
 
     private var touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
@@ -69,20 +56,6 @@ class TrickButton @JvmOverloads constructor(
     private var startY = 0
     private var dragging = false
 
-    /** True once a long press has fired, so ACTION_UP does not also tap. */
-    private var longPressFired = false
-
-    private val longPressTimeout = ViewConfiguration.getLongPressTimeout().toLong()
-
-    // Allocated once: constructing a Runnable per ACTION_DOWN would put garbage
-    // on the touch path.
-    private val longPressRunnable = Runnable {
-        if (!dragging) {
-            longPressFired = true
-            toggleLock()
-        }
-    }
-
     /**
      * Non-generic callbacks on purpose. A Kotlin `Function2<Int, Int, Unit>`
      * would box both arguments on every ACTION_MOVE; a plain interface gives a
@@ -91,8 +64,6 @@ class TrickButton @JvmOverloads constructor(
     interface Listener {
         fun onMoved(x: Int, y: Int)
         fun onSettled(config: TrickButtonConfig)
-        fun onTap()
-        fun onLockChanged(locked: Boolean)
     }
 
     var listener: Listener? = null
@@ -109,14 +80,6 @@ class TrickButton @JvmOverloads constructor(
 
     fun currentConfig(): TrickButtonConfig = config
 
-    fun isActive(): Boolean = armed
-
-    fun setActive(value: Boolean) {
-        if (armed == value) return
-        armed = value
-        invalidate()
-    }
-
     fun isLocked(): Boolean = locked
 
     fun setLocked(value: Boolean) {
@@ -124,11 +87,6 @@ class TrickButton @JvmOverloads constructor(
         locked = value
         config = config.copy(locked = value)
         invalidate()
-    }
-
-    private fun toggleLock() {
-        setLocked(!locked)
-        listener?.onLockChanged(locked)
     }
 
     private fun updatePressed(value: Boolean) {
@@ -164,49 +122,9 @@ class TrickButton @JvmOverloads constructor(
         val ringRadius = outer - ringWidth / 2f - 2f * density
         if (ringRadius > 0f) canvas.drawCircle(cx, cy, ringRadius, ringPaint)
 
-        if (armed) {
-            // Armed: the dot becomes a cross, so the state is unmistakable.
-            crossPaint.color = applyAlpha(config.dotColor, alpha)
-            crossPaint.strokeWidth = (config.borderDp * density).coerceAtLeast(2f)
-            val arm = ringRadius * 0.55f
-            canvas.drawLine(cx - arm, cy - arm, cx + arm, cy + arm, crossPaint)
-            canvas.drawLine(cx - arm, cy + arm, cx + arm, cy - arm, crossPaint)
-        } else {
-            dotPaint.color = applyAlpha(config.dotColor, alpha)
-            val dotRadius = (outer * if (pressed) 0.28f else 0.22f).coerceAtLeast(1f)
-            canvas.drawCircle(cx, cy, dotRadius, dotPaint)
-        }
-
-        if (locked) drawLock(canvas, cx, outer, ringWidth, alpha, density)
-    }
-
-    /** A small padlock at the top of the face, so a pinned button is obvious. */
-    private fun drawLock(
-        canvas: Canvas,
-        cx: Float,
-        outer: Float,
-        ringWidth: Float,
-        alpha: Int,
-        density: Float,
-    ) {
-        val w = outer * 0.30f
-        val top = outer * 0.12f + ringWidth * 0.5f
-        lockPaint.color = applyAlpha(Color.WHITE, alpha)
-        lockPaint.strokeWidth = (1.5f * density).coerceAtLeast(1f)
-
-        // Shackle: the top half of a circle, inset to look like a U.
-        val shackleInset = w * 0.22f
-        bounds.set(
-            cx - w / 2f + shackleInset,
-            top,
-            cx + w / 2f - shackleInset,
-            top + (w - shackleInset * 2f) / 2f * 2f,
-        )
-        canvas.drawArc(bounds, 180f, 180f, false, lockPaint)
-
-        // Body.
-        bounds.set(cx - w / 2f, top + w * 0.30f, cx + w / 2f, top + w * 0.30f + w * 0.52f)
-        canvas.drawRoundRect(bounds, w * 0.12f, w * 0.12f, lockPaint)
+        dotPaint.color = applyAlpha(config.dotColor, alpha)
+        val dotRadius = (outer * if (pressed) 0.28f else 0.22f).coerceAtLeast(1f)
+        canvas.drawCircle(cx, cy, dotRadius, dotPaint)
     }
 
     private fun applyAlpha(color: Int, alpha: Int) =
@@ -221,10 +139,7 @@ class TrickButton @JvmOverloads constructor(
                 startX = screenX
                 startY = screenY
                 dragging = false
-                longPressFired = false
                 updatePressed(true)
-                // A long press pins the button in place.
-                postDelayed(longPressRunnable, longPressTimeout)
             }
 
             // A second finger aborts the gesture cleanly, otherwise lifting one
@@ -234,10 +149,7 @@ class TrickButton @JvmOverloads constructor(
             MotionEvent.ACTION_MOVE -> {
                 val dx = event.rawX - downRawX
                 val dy = event.rawY - downRawY
-                if (!dragging && TrickButtonMath.isDrag(dx, dy, touchSlop)) {
-                    dragging = true
-                    removeCallbacks(longPressRunnable)
-                }
+                if (!dragging && TrickButtonMath.isDrag(dx, dy, touchSlop)) dragging = true
                 if (dragging && !locked) {
                     var nx = TrickButtonMath.dragged(startX, dx, config.pullSpeed)
                     var ny = TrickButtonMath.dragged(startY, dy, config.pullSpeed)
@@ -252,16 +164,11 @@ class TrickButton @JvmOverloads constructor(
                 }
             }
 
+            // A tap that never became a drag is deliberately inert: arming and
+            // disarming were removed so the touch can reach the app underneath.
             MotionEvent.ACTION_UP -> {
-                removeCallbacks(longPressRunnable)
-                // A long press already consumed this gesture as a lock toggle.
-                if (!dragging && !longPressFired) {
-                    performClick()
-                    listener?.onTap()
-                }
                 updatePressed(false)
                 dragging = false
-                longPressFired = false
                 listener?.onSettled(config)
             }
 
@@ -270,16 +177,15 @@ class TrickButton @JvmOverloads constructor(
                 listener?.onSettled(config)
             }
         }
-        // Always true, in every branch including locked and cancel: returning
-        // false would hand this touch to the app underneath.
+        // Always true. This only runs when unlocked: while locked the window
+        // carries FLAG_NOT_TOUCHABLE and never receives touches at all, which
+        // is how taps pass through to the app underneath.
         return true
     }
 
     private fun abortGesture() {
-        removeCallbacks(longPressRunnable)
         updatePressed(false)
         dragging = false
-        longPressFired = false
     }
 
     /**

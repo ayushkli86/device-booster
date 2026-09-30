@@ -24,10 +24,19 @@ data class TrickButtonConfig(
     val x: Int = 0,
     val y: Int = 0,
     /**
-     * When true the button is pinned where it is: dragging is ignored, but
-     * touches are still consumed so they never leak to the app underneath.
+     * When true the button is pinned where it is and transparent to input:
+     * taps pass through to the app underneath. The service applies
+     * FLAG_NOT_TOUCHABLE while this is set, so the view never sees a touch.
      */
     val locked: Boolean = false,
+    /**
+     * Where the free-floating lock control sits, in screen pixels. It is a
+     * separate window so it can be parked anywhere, including well away from
+     * the button. Negative means it has never been placed, which is distinct
+     * from a real 0 coordinate the user could drag it to.
+     */
+    val lockX: Int = -1,
+    val lockY: Int = -1,
 ) {
     /** 0..1 alpha applied to the whole button. */
     val alphaFraction: Float get() = (opacity.coerceIn(0, 100)) / 100f
@@ -38,6 +47,9 @@ data class TrickButtonConfig(
         const val MAX_BORDER = 16
         const val MIN_PULL_SPEED = 0.25f
         const val MAX_PULL_SPEED = 1.0f
+
+        /** Diameter of the floating lock control, in dp. */
+        const val LOCK_SIZE = 40
 
         val DEFAULT_RING = Color.parseColor("#7EE787")
         val DEFAULT_DOT = Color.parseColor("#FF6B6B")
@@ -107,6 +119,8 @@ object TrickButtonStore {
             x = p.getInt("x", d.x),
             y = p.getInt("y", d.y),
             locked = p.getBoolean("locked", d.locked),
+            lockX = p.getInt("lockX", d.lockX),
+            lockY = p.getInt("lockY", d.lockY),
         ).clamped()
     }
 
@@ -125,6 +139,8 @@ object TrickButtonStore {
             .putInt("x", v.x)
             .putInt("y", v.y)
             .putBoolean("locked", v.locked)
+            .putInt("lockX", v.lockX)
+            .putInt("lockY", v.lockY)
             .apply()
     }
 }
