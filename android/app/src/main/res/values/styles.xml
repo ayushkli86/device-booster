@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A white launch window turned every startup failure into an unexplained
+     blank screen. Both windows now use the app's own dark surface colour. -->
+<resources>
+    <color name="booster_background">#0E1116</color>
+
+    <style name="LaunchTheme" parent="@android:style/Theme.Black.NoTitleBar">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+    </style>
+
+    <style name="NormalTheme" parent="@android:style/Theme.Black.NoTitleBar">
+        <item name="android:windowBackground">@color/booster_background</item>
+    </style>
+</resources>
